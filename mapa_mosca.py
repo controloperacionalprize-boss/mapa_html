@@ -200,8 +200,8 @@ def dms_to_decimal(coord_str):
 # ============================================================
 @st.cache_data(show_spinner="Cargando datos de trampas…")
 def load_trampas_anexadas() -> pd.DataFrame:
-    path_aquai  = r"C:\Users\lperez.LPEREZPRUEBA\Downloads\BD_Mosca_Fruta_AQUAI.xlsx"
-    path_aquaii = r"C:\Users\lperez.LPEREZPRUEBA\Downloads\BD_Mosca_Fruta_AQUAII.xlsx"
+    path_aquai  = "data/BD_Mosca_Fruta_AQUAI.xlsx"
+    path_aquaii = "data/BD_Mosca_Fruta_AQUAII.xlsx"
 
     df1 = pd.read_excel(path_aquai,  sheet_name="Bdatos")
     df2 = pd.read_excel(path_aquaii, sheet_name="BDatos AQU II")
