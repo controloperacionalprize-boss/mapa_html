@@ -669,8 +669,11 @@ if turnos_rojos_keys:
             col_chk, col_info = st.sidebar.columns([1, 5])
             with col_chk:
             
-                st.checkbox("", key=f"tr_{key_r}", label_visibility="collapsed")
-
+                st.checkbox(
+                    "Seleccionar",
+                    key=f"tr_{key_r}",
+                    label_visibility="collapsed"
+                )
             with col_info:
                 visible = st.session_state.get(f"tr_{key_r}", True)
                 tach    = "text-decoration:line-through;color:#bbb;" if not visible else ""
@@ -1377,43 +1380,98 @@ with col_pub:
             st.sidebar.error(f"Error: {resultado}")
 
 with col_png:
+
     if st.button("🖼️ PNG", use_container_width=True, key="btn_png"):
+
         with st.spinner("Capturando mapa..."):
+
+            driver = None
+            tmp_html = None
+
             try:
+
                 from selenium import webdriver
                 from selenium.webdriver.chrome.options import Options
                 from selenium.webdriver.chrome.service import Service
-                from webdriver_manager.chrome import ChromeDriverManager
-                import time, tempfile, os
 
-                tmp_html = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
+                import platform
+                import time
+                import tempfile
+                import os
+
+                # HTML temporal
+                tmp_html = tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=".html"
+                )
+
                 tmp_html.write(_html_mapa.encode("utf-8"))
                 tmp_html.close()
 
+                # Config Chrome
                 opts = Options()
-                opts.add_argument("--headless")
+
+                opts.add_argument("--headless=new")
                 opts.add_argument("--no-sandbox")
                 opts.add_argument("--disable-dev-shm-usage")
+                opts.add_argument("--disable-gpu")
                 opts.add_argument("--window-size=1920,1080")
 
-                service = Service(ChromeDriverManager().install())
-                driver  = webdriver.Chrome(service=service, options=opts)
+                # Windows local
+                if platform.system() == "Windows":
+
+                    from webdriver_manager.chrome import ChromeDriverManager
+
+                    service = Service(
+                        ChromeDriverManager().install()
+                    )
+
+                # Linux / Streamlit Cloud
+                else:
+
+                    opts.binary_location = "/usr/bin/chromium"
+
+                    service = Service(
+                        "/usr/bin/chromedriver"
+                    )
+
+                # Driver
+                driver = webdriver.Chrome(
+                    service=service,
+                    options=opts
+                )
+
+                # Abrir HTML
                 driver.get(f"file:///{tmp_html.name}")
 
-                time.sleep(4)
+                time.sleep(5)
 
-                total_width  = driver.execute_script("return document.body.scrollWidth")
-                total_height = driver.execute_script("return document.body.scrollHeight")
-                driver.set_window_size(total_width, total_height)
+                # Tamaño real
+                total_width = driver.execute_script(
+                    "return document.body.scrollWidth"
+                )
+
+                total_height = driver.execute_script(
+                    "return document.body.scrollHeight"
+                )
+
+                driver.set_window_size(
+                    total_width,
+                    total_height
+                )
 
                 time.sleep(2)
-                driver.execute_script("window.scrollTo(0, 0);")
+
+                driver.execute_script(
+                    "window.scrollTo(0, 0);"
+                )
+
                 time.sleep(1)
 
+                # Screenshot
                 png_bytes = driver.get_screenshot_as_png()
-                driver.quit()
-                os.unlink(tmp_html.name)
 
+                # Descargar
                 st.sidebar.download_button(
                     label="⬇️ Descargar PNG",
                     data=png_bytes,
@@ -1421,11 +1479,34 @@ with col_png:
                     mime="image/png",
                     key="btn_dl_png_real"
                 )
+
                 st.sidebar.success("✅ PNG listo")
 
             except Exception as e:
+
                 st.sidebar.error(f"Error: {e}")
+
+            finally:
+
+                try:
+                    if driver:
+                        driver.quit()
+                except:
+                    pass
+
+                try:
+                    if tmp_html:
+                        os.unlink(tmp_html.name)
+                except:
+                    pass
+
 # ============================================================
-# FIX 5: st_folium con key= — evita re-renderizados completos del mapa
+# ST_FOLIUM
 # ============================================================
-st_folium(m, width=None, height=950, returned_objects=[], key="main_map")
+st_folium(
+    m,
+    width=None,
+    height=950,
+    returned_objects=[],
+    key="main_map"
+)
