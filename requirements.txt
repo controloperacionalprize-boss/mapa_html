@@ -11,3 +11,5 @@ scipy
 pillow
 openpyxl
 streamlit-autorefresh==1.0.1
+selenium
+webdriver-manager
