@@ -1,3 +1,6 @@
 .streamlit/secrets.toml
 mapa_mosca.v2.py
 mapa_moscav3.py
+mapa_moscav4.py
+mapa_streamlit_js.html
+data/MODULOS_PRIZE_PAIJAN.kmz

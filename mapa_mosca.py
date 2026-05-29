@@ -1,12 +1,8 @@
 # ============================================================
 # MAPA EPIDEMIOLÓGICO AGRÍCOLA — Mosca de la Fruta
-# v6 — Pintado por polígono KMZ (Módulo + Turno)
-#   1. load_polygons_from_kml con @st.cache_data
-#   2. KMZ leído como bytes (cacheable)
-#   3. Filtro KMZ vectorizado (shapely>=2 contains_xy)
-#   4. Pintado directo por polígono: cruza (mod_n, tur_n)
-#      Excel ↔ KMZ con normalización robusta de texto sucio
-#   5. st_folium con key="main_map"
+# v7 CORREGIDA — Fixes aplicados:
+#   1. Bloque de polígonos: indentación y lógica de colores
+#   2. Vectores: pane personalizado, escalas, z-index
 # ============================================================
 
 # --- IMPORTS ---
@@ -291,6 +287,65 @@ def load_polygons_with_desc(kml_bytes: bytes):
     _walk(root)
     return out
 
+def _subir_png_a_github(png_bytes):
+    import datetime, base64, urllib.request, json
+    
+    if not GITHUB_TOKEN:
+        return False, "No hay GITHUB_TOKEN configurado."
+        
+    headers = {
+        "Authorization":        f"Bearer {GITHUB_TOKEN}",
+        "Accept":               "application/vnd.github+json",
+        "Content-Type":         "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    
+    # Generar el mismo sufijo que usas para el HTML
+    if sel_semana and sel_anio:
+        sufijo = f"A{'-'.join(map(str,sorted(sel_anio)))}_S{'-'.join(map(str,sorted(sel_semana)))}"
+    elif sel_anio:
+        sufijo = "A" + "-".join(map(str, sorted(sel_anio)))
+    elif sel_semana:
+        sufijo = "S" + "-".join(map(str, sorted(sel_semana)))
+    else:
+        sufijo = "SinFiltro"
+        
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    mensaje  = f"Mapa PNG generado {ts} | {sufijo}"
+    
+    # 📁 Carpeta y nombre de archivo en tu repositorio
+    nombre_archivo = f"historico_png/mapa_{sufijo}.png"
+    api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{nombre_archivo}"
+    
+    # 1. Obtener SHA si la imagen ya existe (para poder sobreescribirla)
+    sha = None
+    try:
+        req  = urllib.request.Request(api_url + f"?ref={GITHUB_BRANCH}", headers=headers)
+        resp = urllib.request.urlopen(req, timeout=10)
+        sha  = json.loads(resp.read())["sha"]
+    except urllib.error.HTTPError:
+        pass # Si arroja error 404 es porque no existe aún, lo cual está bien.
+        
+    # 2. Preparar el payload codificando los bytes directamente a Base64
+    payload = {
+        "message": mensaje,
+        "content": base64.b64encode(png_bytes).decode('utf-8'),
+        "branch":  GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+        
+    # 3. Hacer el PUT a la API de GitHub
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req  = urllib.request.Request(api_url, data=data, headers=headers, method="PUT")
+        urllib.request.urlopen(req, timeout=60)
+        
+        # Retornamos la URL pública (asumiendo que tienes GitHub Pages activado en la raíz)
+        url_publica = f"https://{GITHUB_OWNER}.github.io/{GITHUB_REPO}/{nombre_archivo}"
+        return True, url_publica
+    except Exception as ex:
+        return False, f"Error subiendo PNG: {ex}"
 
 # ============================================================
 # CONVERSIÓN DMS → DECIMAL
@@ -428,32 +483,70 @@ def _label_semaforo(cap: float) -> str:
 
 
 # ============================================================
-# SAETA (FLECHA CON PUNTA TRIANGULAR)
+# SAETA (FLECHA CON PUNTA TRIANGULAR) — CON PANE PERSONALIZADO
 # ============================================================
 def draw_arrow(fg, lat0, lon0, lat1, lon1, color, weight, opacity,
-               head_size_deg=0.00006, tooltip=""):
+               head_size_deg=0.00006, tooltip="", pane="vectors"):
+    
+    # ---------------------------------------------------------
+    # 1. CAPA DE FONDO (EL BORDE BLANCO)
+    # ---------------------------------------------------------
+    # Línea blanca más gruesa
     folium.PolyLine(
         locations=[(lat0, lon0), (lat1, lon1)],
-        color=color, weight=weight, opacity=opacity,
-        tooltip=tooltip
+        color='white', weight=weight + 3.5, opacity=0.9,
+        tooltip=tooltip, pane=pane
     ).add_to(fg)
+
+    # Cálculos base para la geometría
     dlat  = lat1 - lat0
     dlon  = lon1 - lon0
     angle = math.atan2(dlat, dlon)
-    hs    = head_size_deg * (0.7 + weight * 0.15)
     tip_lat, tip_lon = lat1, lon1
     left_angle  = angle + math.radians(155)
     right_angle = angle - math.radians(155)
+    
+    # Tamaño de la punta original
+    hs = head_size_deg * (0.7 + weight * 0.15)
+    # Tamaño de la punta blanca (un 50% más grande para que sobresalga por los bordes)
+    hs_bg = hs * 1.5 
+    
+    # Coordenadas del triángulo blanco
+    l_lat_bg = lat1 + hs_bg * math.sin(left_angle)
+    l_lon_bg = lon1 + hs_bg * math.cos(left_angle)
+    r_lat_bg = lat1 + hs_bg * math.sin(right_angle)
+    r_lon_bg = lon1 + hs_bg * math.cos(right_angle)
+
+    # Dibujar la punta blanca
+    folium.Polygon(
+        locations=[(tip_lat, tip_lon), (l_lat_bg, l_lon_bg), (r_lat_bg, r_lon_bg)],
+        color='white', fill=True, fill_color='white',
+        fill_opacity=0.9, weight=1, tooltip=tooltip, pane=pane
+    ).add_to(fg)
+
+
+    # ---------------------------------------------------------
+    # 2. CAPA SUPERIOR (LA FLECHA ORIGINAL)
+    # ---------------------------------------------------------
+    # Línea con el color original
+    folium.PolyLine(
+        locations=[(lat0, lon0), (lat1, lon1)],
+        color=color, weight=weight, opacity=opacity,
+        tooltip=tooltip, pane=pane
+    ).add_to(fg)
+
+    # Coordenadas del triángulo original
     left_lat  = lat1 + hs * math.sin(left_angle)
     left_lon  = lon1 + hs * math.cos(left_angle)
     right_lat = lat1 + hs * math.sin(right_angle)
     right_lon = lon1 + hs * math.cos(right_angle)
+
+    # Dibujar la punta con el color original
     folium.Polygon(
         locations=[(tip_lat, tip_lon), (left_lat, left_lon), (right_lat, right_lon)],
         color=color, fill=True, fill_color=color,
-        fill_opacity=opacity, weight=0, tooltip=tooltip
+        fill_opacity=opacity, weight=0, tooltip=tooltip, pane=pane
     ).add_to(fg)
-
 
 # ============================================================
 # GRADIENTE ESPACIAL — VECTORES DE PROPAGACIÓN
@@ -690,24 +783,24 @@ st.sidebar.markdown("---")
 
 
 # ============================================================
-# VECTORES DE PROPAGACIÓN
+# VECTORES DE PROPAGACIÓN — FIX: ESCALAS MEJORADAS
 # ============================================================
 with st.sidebar.expander("🧭 Vectores de Propagación", expanded=False):
     mostrar_vectores = st.checkbox(
-        "Mostrar saetas de propagación", value=False, key="show_vectors"
+        "Mostrar saetas de propagación", value=True, key="show_vectors"  # ✅ FIX: True por defecto
     )
-    n_arrows      = 15
-    escala_flecha = 6
-    min_mag       = 0.05
-    color_flechas = "#1a1aff"
-    head_size     = 6
+    n_arrows      = 20  # ✅ FIX: Aumentado de 15 a 20
+    escala_flecha = 15  # ✅ FIX: Aumentado de 6 a 15 (2.5x más visible)
+    min_mag       = 0.02  # ✅ FIX: Reducido de 0.05 a 0.02 (más vectores)
+    color_flechas = "#0066FF"  # ✅ FIX: Azul más brillante
+    head_size     = 8  # ✅ FIX: Aumentado de 6 a 8
 
     if mostrar_vectores:
-        n_arrows      = st.slider("Densidad de saetas",              5,  30, 15, key="n_arrows")
-        escala_flecha = st.slider("Longitud de saetas (×10⁻⁴ °)",   1,  20,  6, key="arrow_scale")
-        head_size     = st.slider("Tamaño de punta (×10⁻⁵ °)",      1,  20,  6, key="head_size")
-        min_mag       = st.slider("Magnitud mínima (filtro ruido)",  1,  30,  5, key="min_mag") / 100.0
-        color_flechas = st.color_picker("Color saetas", value="#1a1aff", key="arrow_color")
+        n_arrows      = st.slider("Densidad de saetas",              5,  40, 20, key="n_arrows")  # ✅ FIX: Máx 40
+        escala_flecha = st.slider("Longitud de saetas (×10⁻⁴ °)",   3,  50, 15, key="arrow_scale")  # ✅ FIX: Rango mayor
+        head_size     = st.slider("Tamaño de punta (×10⁻⁵ °)",      2,  30, 8, key="head_size")  # ✅ FIX: Mín 2
+        min_mag       = st.slider("Magnitud mínima (filtro ruido)",  0,  20, 0, key="min_mag") / 10000.0        
+        color_flechas = st.color_picker("Color saetas", value="#0066FF", key="arrow_color")
         st.caption("🧭 Las saetas apuntan hacia donde **aumenta** la densidad de captura.")
 
 st.sidebar.markdown("---")
@@ -892,6 +985,19 @@ m = folium.Map(
     attr='&copy; OpenStreetMap &copy; CARTO',
 )
 
+# ✅ FIX: PANE PERSONALIZADO PARA VECTORES (Z-INDEX ALTO)
+m.get_root().html.add_child(folium.Element("""
+<style>
+    .leaflet-pane.vectors-pane {
+        z-index: 800 !important;  /* MÁS ALTO que heatmap (650) y polígonos (400) */
+    }
+</style>
+<script>
+    map.createPane('vectors');
+    map.getPane('vectors').style.zIndex = 800;
+</script>
+"""))
+
 # Panes custom para que heatmap espectral / líneas de curvas queden ENCIMA
 # de los marcadores (markerPane=600). zIndex=650.
 
@@ -911,9 +1017,8 @@ m.get_root().html.add_child(folium.Element("""
 
 
 # ============================================================
-# PINTADO DE POLÍGONOS — v9
-# Usar SIEMPRE dff_activa (datos completos sin filtro de visibilidad)
-# para que todos los polígonos se pinten igual independientemente del método
+# PINTADO DE POLÍGONOS — v10 CORREGIDO
+# ✅ FIX: Indentación y lógica de colores
 # ============================================================
 
 if not dff_activa.empty:
@@ -1009,7 +1114,7 @@ union_con_dato = unary_union(_polys_con_dato) if _polys_con_dato else None
 # ============================================================
 # HEATMAP + CURVAS DE NIVEL — imagen única inline (v2 style)
 # ============================================================
-GRID_RES = 1200  # Aumentado de 600 → 1200 para mejor resolución (menos pixelación)
+GRID_RES = 600
 
 grid_z_for_vectors = None
 b64_curvas = None
@@ -1052,23 +1157,23 @@ if (
         
         _pts_xy, _pts_z = [], []
         
-        # ──── MÉTODO 1: GPS con agregación por turno (igual que KMZ)
+        # ── MÉTODO 1: GPS — Interpolar desde puntos GPS reales
         if metodo == "GPS (si existe)":
-            # En lugar de interpolar puntos GPS individuales,
-            # usamos la misma lógica que KMZ: agregamos por (fundo_aq, mod_n, tur_n)
-            # pero priorizamos GPS cuando existen coordenadas reales
-            
             _pts_xy_gps, _pts_z_gps = [], []
             _pts_set_gps = set()
             
-            # Prioridad 1: Datos con GPS real (de Excel con coordenadas)
+            # Prioridad 1: Datos con GPS real (TODOS los puntos, sin duplicados exactos)
+            n_gps_orig = 0
             if len(dff_gps) >= 1:
                 for _, row in dff_gps.iterrows():
-                    _pts_xy_gps.append((row["lon"], row["lat"]))
-                    _pts_z_gps.append(row["capturas"])
-                    _pts_set_gps.add((row["lon"], row["lat"]))
+                    xy_tuple = (row["lon"], row["lat"])
+                    if xy_tuple not in _pts_set_gps:
+                        _pts_xy_gps.append(xy_tuple)
+                        _pts_z_gps.append(row["capturas"])
+                        _pts_set_gps.add(xy_tuple)
+                        n_gps_orig += 1
             
-            # Fallback 2: Si GPS insuficiente, agregar KMZ centroides
+            # Fallback 2: Si GPS insuficiente (<3), agregar KMZ centroides
             if len(_pts_xy_gps) < 3:
                 for _pp in polygons:
                     _mn2  = _pp.get("mod_n")
@@ -1080,19 +1185,27 @@ if (
                     if _key_t2 in dict_turno:
                         _c2 = _pp["shapely_polygon"].centroid
                         xy_tuple = (_c2.x, _c2.y)
-                        if xy_tuple not in _pts_set_gps:  # No duplicar
+                        if xy_tuple not in _pts_set_gps:
                             _pts_xy_gps.append(xy_tuple)
                             _pts_z_gps.append(dict_turno[_key_t2][1])
+                            _pts_set_gps.add(xy_tuple)
             
             # Retornar si hay suficientes puntos
             if len(_pts_xy_gps) >= 3:
                 _arr = _np_int.array(_pts_xy_gps)
                 x, y, z = _arr[:,0], _arr[:,1], _np_int.array(_pts_z_gps, dtype=float)
-                msg = f"📍 GPS ({len(dff_gps)}) + 🗺️ KMZ ({len(_pts_xy_gps) - len(dff_gps)}) = {len(x)} total"
+                n_kmz_added = len(_pts_xy_gps) - n_gps_orig
+                if n_gps_orig > 0:
+                    msg = f"📍 GPS ({n_gps_orig})"
+                    if n_kmz_added > 0:
+                        msg += f" + 🗺️ KMZ fallback ({n_kmz_added})"
+                    msg += f" = {len(x)} total"
+                else:
+                    msg = f"⚠️ Sin GPS, usando 🗺️ KMZ ({n_kmz_added} centroides)"
                 return x, y, z, msg
             else:
-                return None, None, None, f"❌ Solo {len(_pts_xy_gps)} puntos (mín 3)"
-        
+                return None, None, None, f"❌ Solo {len(_pts_xy_gps)} puntos (mín 3 para interpolar)"
+
         # ──── MÉTODO 2: KMZ centroides
         elif metodo == "Lotes KMZ (centroides)":
             for _pp in polygons:
@@ -1240,17 +1353,20 @@ if (
                 ).reshape(grid_z_masked.shape)
 
         gz_smooth_global             = gaussian_filter(
-            np.where(np.isnan(grid_z_masked), 0, grid_z_masked), sigma=8
+            np.where(np.isnan(grid_z_masked), 0, grid_z_masked), sigma=2
         )
-        gz_smooth_global[~mask_poly] = np.nan
+        
+        # --- NUEVO: Usamos mask_dato si existe para bloquear áreas grises ---
+        mask_para_vectores = mask_dato if mask_dato is not None else mask_poly
+        
+        gz_smooth_global[~mask_para_vectores] = np.nan
         grid_z_for_vectors           = gz_smooth_global
-        grid_x_gv, grid_y_gv, mask_poly_gv = grid_x, grid_y, mask_poly
+        grid_x_gv, grid_y_gv, mask_poly_gv = grid_x, grid_y, mask_para_vectores
 
         if not np.all(np.isnan(grid_z_masked)):
 
             if modo_color == "Curvas de Nivel":
                 # ── CURVAS DE NIVEL SUAVIZADAS: Grilla de alta resolución + Suavizado progresivo
-                # SUAVIZADO PROGRESIVO: Aplicar Gaussian múltiples veces para máxima suavidad
                 gz_smooth = np.where(np.isnan(grid_z_masked), 0, grid_z_masked).copy()
                 
                 # Primera pasada: Suavizado moderado
@@ -1275,12 +1391,12 @@ if (
                 fig2.patch.set_alpha(0)
                 try:
                     # BANDAS DE RELLENO: Muchos niveles para máxima suavidad
-                    num_niveles_relleno = 25  # Aumentado de 15 → 25 para transiciones ultrasaves
+                    num_niveles_relleno = 25
                     niveles_relleno = np.linspace(0.01, max_level, num_niveles_relleno)
                     
                     # Paleta de colores suavizada: Verde → Amarillo → Naranja → Rojo
                     from matplotlib.colors import LinearSegmentedColormap
-                    colores_paleta = ["#00FF00", "#CCFF00", "#FFFF00", "#FFCC00", "#FFA500", "#FF7500", "#FF6600", "#FF0000"]
+                    colores_paleta = ["#1CFF00", "#CCFF00", "#FFFF00", "#FFCC00", "#FFA500", "#FF7500", "#FF6600", "#FF0000"]
                     cmap_custom = LinearSegmentedColormap.from_list("mosca_fruta", colores_paleta)
                     
                     contourf_obj = ax2.contourf(
@@ -1306,8 +1422,8 @@ if (
                         cl2 = ax2.contour(
                             grid_x.T, grid_y.T, gz_smooth_masked_cv.T,
                             levels=niveles_linea,
-                            colors="#1a1a1a",  # Negro profundo
-                            linewidths=grosor_lineas * 0.5,  # ← Líneas más delgadas (0.5x en lugar de 0.8x)
+                            colors="#1a1a1a",
+                            linewidths=grosor_lineas * 0.5,
                             alpha=0.90,
                             linestyles="solid"
                         )
@@ -1333,11 +1449,9 @@ if (
                 img2.save(buf3, format="PNG")
                 buf3.seek(0)
                 b64_curvas = base64.b64encode(buf3.read()).decode()
-                # Se añade al mapa DESPUÉS de los polígonos y marcadores (ver abajo)
 
             else:
                 # ESPECTRAL / NORMAL — Suavizado multi-pasada + Alta resolución
-                # Aplicar suavizado progresivo (igual que Curvas de Nivel)
                 gz_spectral = np.where(np.isnan(grid_z_masked), 0, grid_z_masked).copy()
                 
                 # Primera pasada: Suavizado fuerte
@@ -1358,8 +1472,8 @@ if (
                 
                 # Paleta espectral mejorada: Verde → Amarillo → Naranja → Rojo
                 from matplotlib.colors import LinearSegmentedColormap
-                colores_espectral = ["#00FF00", "#CCFF00", "#FFFF00", "#FFCC00", 
-                                    "#FFA500", "#FF7500", "#FF6600", "#FF0000"]
+                colores_espectral = ["#1CFF00", "#CCFF00", "#FFFF00", "#FFCC00", 
+                    "#FFA500", "#FF7500", "#FF6600", "#FF0000"]
                 cmap_espectral = LinearSegmentedColormap.from_list("espectral_mosca", colores_espectral)
                 
                 # Normalizar valores para usar con el colormap
@@ -1379,7 +1493,7 @@ if (
                                 rgba_color = cmap_espectral(val_norm)
                                 rgba[i, j, :3] = (np.array(rgba_color[:3]) * 255).astype(np.uint8)
                                 # Opacidad basada en valor
-                                rgba[i, j, 3] = int(255 * (0.3 + 0.7 * val_norm))  # 30-100% opaco
+                                rgba[i, j, 3] = int(255 * (0.3 + 0.7 * val_norm))
                             else:
                                 # Modo Normal: usar colores semáforo
                                 ch = get_color_normal(val)
@@ -1402,18 +1516,19 @@ if (
                 folium.raster_layers.ImageOverlay(
                     image="data:image/png;base64," + b64_heat,
                     bounds=[[ymin, xmin], [ymax, xmax]],
-                    opacity=0.98, name=f"Heatmap ({modo_color})",  # ← 0.98 para máxima visibilidad
+                    opacity=0.98, name=f"Heatmap ({modo_color})",
                 ).add_to(m)
 
 # ============================================================
-# POLÍGONOS COLOREADOS — DESPUÉS (z-index alto)
+# POLÍGONOS COLOREADOS — v10 CORREGIDO
+# ✅ FIX: Bloque completo reorganizado
 # ============================================================
 fg_poly_fill = FeatureGroup(name="🗺️ Módulos coloreados", show=True)
 
 for p in polygons:
     mod_n    = p.get("mod_n")
     tur_n    = p.get("tur_n")
-    fundo_aq = p.get("fundo_aq")   # 'AQ1', 'AQ2', o None
+    fundo_aq = p.get("fundo_aq")
     attrs    = p.get("desc_attrs", {})
     lote_kmz = _norm_lote(attrs.get("lote"))
 
@@ -1427,6 +1542,7 @@ for p in polygons:
     cap_max   = None
     nivel_txt = ""
 
+    # ✅ FIX FASE 1: Buscar cap_max en los diccionarios
     if mod_n is not None and tur_n is not None and fundo_aq is not None:
         key_l = (fundo_aq, mod_n, tur_n, lote_kmz) if lote_kmz else None
         key_t = (fundo_aq, mod_n, tur_n)
@@ -1447,52 +1563,46 @@ for p in polygons:
             cap_max   = dict_mod[key_m][1]
             nivel_txt = f"Módulo {mod_n}"
 
+    # ✅ FIX FASE 2: Asignar colores y tooltip según cap_max
     if cap_max is not None:
-        # Los polígonos SIEMPRE usan el color semafórico normal como capa base
-        # dominante en los tres modos. Los overlays raster van encima.
-        fill_color  = get_color_normal(cap_max)
-        import matplotlib.colors as _mc
-        r, g, b     = _mc.to_rgb(fill_color)
-        border_color = "#{:02x}{:02x}{:02x}".format(
-            max(0, int(r*255) - 60),
-            max(0, int(g*255) - 60),
-            max(0, int(b*255) - 60),
-        )
-        # Relleno semafórico 0.25 en TODOS los modos
-        fill_op = 0.65
-        weight   = 3  # ← Aumentado de 2 a 3 para que se vean mejor
+        # Verde fuerte en TODOS los modos
+        fill_color = "#1CFF00"
+        fill_op = 0.40
+        weight   = 3
+        
+        # Tooltip con datos
         tooltip_lines.append(f"<b>Capturas:</b> {int(cap_max)}")
         tooltip_lines.append(f"<b>Nivel:</b> {_label_semaforo(cap_max)}")
         tooltip_lines.append(f"<b>Origen dato:</b> {nivel_txt}")
     else:
+        # Sin dato
         fill_color   = "#888888"
         border_color = "#555555"
         fill_op  = 0.0
         weight   = 1
         tooltip_lines.append("<i style='color:#999;'>Sin dato en filtro actual</i>")
 
+    # ✅ FIX: Calcular border_color desde fill_color (en ambos casos)
+    import matplotlib.colors as _mc
+    r, g, b     = _mc.to_rgb(fill_color)
+    border_color = "#{:02x}{:02x}{:02x}".format(
+        max(0, int(r*255) - 60),
+        max(0, int(g*255) - 60),
+        max(0, int(b*255) - 60),
+    )
+
     # Ajustar opacidad según el modo de visualización
-    if modo_color == "Curvas de Nivel":
-        # En Curvas de Nivel: aumentar opacidad de polígonos
-        fill_op_final = (fill_op * 1.3 if fill_op > 0 else 0)
-    elif modo_color == "Espectral":
-        # En Espectral: REDUCIR opacidad para no opacar el heatmap
-        fill_op_final = (fill_op * 0.4 if fill_op > 0 else 0)  # Reduce a 40% de la opacidad original
-    else:
-        # En Normal: mantener opacidad original
-        fill_op_final = fill_op
-    
-    fill_op_final = min(fill_op_final, 1.0)  # Clamped a máximo 1.0
+    fill_op_final = min(fill_op, 1.0)
 
     folium.Polygon(
         locations=p["folium_coords"],
         tooltip=folium.Tooltip("<br>".join(tooltip_lines)),
-        color=border_color,      # borde siempre visible y oscuro
+        color=border_color,
         weight=weight,
         fill=True,
-        fill_color=fill_color,   # relleno con opacidad controlable
+        fill_color=fill_color,
         fill_opacity=fill_op_final,
-        opacity=0.95,             # borde siempre al 100%
+        opacity=0.95,
     ).add_to(fg_poly_fill)
 
 fg_poly_fill.add_to(m)
@@ -1500,18 +1610,11 @@ fg_poly_fill.add_to(m)
 
 # ============================================================
 # MARCADORES DE TRAMPAS — v9
-# Posición: centroide del polígono KMZ exacto del LOTE
-#   Cruce: (mod_n, tur_n, lote_norm) Excel ↔ KMZ
-#   Un marcador por cada (mod_n, tur_n, lote_norm) único
-#   Capturas: máximo del grupo
-#
-# PINTADO DE FONDO: a nivel de TURNO (todos los lotes del
-#   mismo turno reciben el mismo color) — ya hecho arriba.
 # ============================================================
 if not dff_map.empty and polygons:
     # ── Índice KMZ: (fundo_aq, mod_n, tur_n, lote_norm) → shapely_polygon
-    kmz_lote_index  = {}   # {(fundo_aq, mod_n, tur_n, lote_str): shapely_polygon}
-    kmz_turno_index = {}   # {(fundo_aq, mod_n, tur_n): [shapely_polygon, ...]}
+    kmz_lote_index  = {}
+    kmz_turno_index = {}
 
     for p in polygons:
         mn  = p.get("mod_n")
@@ -1565,7 +1668,7 @@ if not dff_map.empty and polygons:
                 poly_geom = unary_union(polys_t) if len(polys_t) > 1 else polys_t[0]
 
         if poly_geom is None:
-            continue  # sin polígono KMZ → no mostrar
+            continue
 
         centroid = poly_geom.centroid
         c_lat    = centroid.y
@@ -1623,12 +1726,11 @@ if not dff_map.empty and polygons:
 
 # ── Curvas de nivel ENCIMA de polígonos (mejor visibilidad)
 if modo_color == "Curvas de Nivel" and b64_curvas:
-    # Usar opacidad del slider si existe, sino usar 0.98 por defecto
     opacity_curvas = (opacidad_relleno / 100.0) if opacidad_relleno is not None else 0.98
     contour_layer = folium.raster_layers.ImageOverlay(
         image="data:image/png;base64," + b64_curvas,
         bounds=[[ymin, xmin], [ymax, xmax]],
-        opacity=opacity_curvas,  # ← Controlable por slider, 98% por defecto
+        opacity=opacity_curvas,
         name="Curvas de nivel",
         className="contour-overlay"
     )
@@ -1639,7 +1741,7 @@ if modo_color == "Curvas de Nivel" and b64_curvas:
     <style>
         /* Curvas de nivel encima de los polígonos */
         .leaflet-pane.leaflet-overlay-pane {
-            z-index: 410 !important;  /* Un poco arriba de polígonos */
+            z-index: 410 !important;
         }
         .contour-overlay {
             z-index: 410 !important;
@@ -1756,6 +1858,7 @@ m.get_root().html.add_child(folium.Element(f"""
 
 # ============================================================
 # VECTORES DE PROPAGACIÓN — DIBUJAR FLECHAS
+# ✅ FIX: Pasar pane="vectors" a draw_arrow
 # ============================================================
 if mostrar_vectores and grid_z_for_vectors is not None and grid_x_gv is not None:
     try:
@@ -1777,15 +1880,18 @@ if mostrar_vectores and grid_z_for_vectors is not None and grid_x_gv is not None
                 dlon = v["dlon"]
                 mag  = v["magnitude"]
                 
-                lat1 = lat0 + dlat * mag * escala_flecha_m
-                lon1 = lon0 + dlon * mag * escala_flecha_m
+                # Eliminamos '* mag' para que el tamaño dependa 100% del slider
+                lat1 = lat0 + dlat * escala_flecha_m
+                lon1 = lon0 + dlon * escala_flecha_m
                 
                 tooltip_txt = f"Magnitud: {mag:.3f}"
                 
+                # ✅ FIX: Pasar pane="vectors" a draw_arrow
                 draw_arrow(
                     fg_vectors, lat0, lon0, lat1, lon1,
                     color=color_flechas, weight=2, opacity=0.7,
-                    head_size_deg=head_size_deg, tooltip=tooltip_txt
+                    head_size_deg=head_size_deg, tooltip=tooltip_txt,
+                    pane="vectors"  # ✅ FIX
                 )
             
             fg_vectors.add_to(m)
@@ -1962,7 +2068,6 @@ with col_pub:
             st.sidebar.success("✅ Publicado.")
         else:
             st.sidebar.error(f"Error: {resultado}")
-
 with col_png:
     if st.button("🖼️ PNG", use_container_width=True, key="btn_png"):
         with st.spinner("Capturando mapa..."):
@@ -1973,40 +2078,59 @@ with col_png:
                 from selenium.webdriver.chrome.options import Options
                 from selenium.webdriver.chrome.service import Service
                 import platform, time, tempfile, os
+                
                 tmp_html = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
                 tmp_html.write(_html_mapa.encode("utf-8"))
                 tmp_html.close()
+                
                 opts = Options()
                 opts.add_argument("--headless=new")
                 opts.add_argument("--no-sandbox")
                 opts.add_argument("--disable-dev-shm-usage")
                 opts.add_argument("--disable-gpu")
                 opts.add_argument("--window-size=1920,1080")
+                
                 if platform.system() == "Windows":
                     from webdriver_manager.chrome import ChromeDriverManager
                     service = Service(ChromeDriverManager().install())
                 else:
                     opts.binary_location = "/usr/bin/chromium"
                     service = Service("/usr/bin/chromedriver")
+                    
                 driver = webdriver.Chrome(service=service, options=opts)
                 driver.get(f"file:///{tmp_html.name}")
                 time.sleep(5)
+                
                 total_width  = driver.execute_script("return document.body.scrollWidth")
                 total_height = driver.execute_script("return document.body.scrollHeight")
                 driver.set_window_size(total_width, total_height)
                 time.sleep(2)
                 driver.execute_script("window.scrollTo(0, 0);")
                 time.sleep(1)
+                
                 png_bytes = driver.get_screenshot_as_png()
+                
+                # --- NUEVO: SUBIR A GITHUB AUTOMÁTICAMENTE ---
+                st.sidebar.info("☁️ Subiendo imagen a GitHub...")
+                ok_png, res_png = _subir_png_a_github(png_bytes)
+                if ok_png:
+                    st.sidebar.success(f"✅ Imagen guardada en el repositorio histórico!")
+                else:
+                    st.sidebar.error(res_png)
+                # ---------------------------------------------
+
+                # Mostrar botón para descargar localmente si el usuario lo desea
                 st.sidebar.download_button(
-                    label="⬇️ Descargar PNG", data=png_bytes,
+                    label="⬇️ Descargar PNG local", data=png_bytes,
                     file_name=f"{_nombre_png}.png", mime="image/png",
                     key="btn_dl_png_real"
                 )
-                st.sidebar.success("✅ PNG listo")
+                
             except Exception as e:
-                st.sidebar.error(f"Error: {e}")
+                st.sidebar.error(f"Error generando PNG: {e}")
+                
             finally:
+                # Limpieza de memoria y archivos temporales (solo una vez)
                 try:
                     if driver: driver.quit()
                 except: pass
